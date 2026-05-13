@@ -1,0 +1,18 @@
+{
+  "secret_id": "sec_pypi_001",
+  "secret_type": "pypi_token",
+  "issuer": "pypi.org",
+  "scope": "package:publish:tibet-zip",
+  "created_at": "2026-05-13T00:00:00Z",
+  "expires_at": null,
+  "owner_id": "jis:humotica:jasper.admin",
+  "custodian_id": "jis:humotica:keychain",
+  "active_operator_id": "jis:humotica:jasper.admin",
+  "last_access_action_id": null,
+  "last_rotation_action_id": null,
+  "exposure_state": "sealed",
+  "rotation_required": false,
+  "notes": [
+    "example keychain projection for tibet-sam validation"
+  ]
+}

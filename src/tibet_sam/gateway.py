@@ -6,7 +6,10 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
+from .keychain_bridge import validate_keychain_binding
 from .materialize import emit_sealed_payload_bundle
 from .types import SAMConstraint, SAMGatewayEvent, SAMGatewayResponse, SAMRecord
 
@@ -54,6 +57,12 @@ def _record_from_payload(payload: dict) -> SAMRecord:
         actor_id=payload["actor_id"],
         valid_until=payload["valid_until"],
         ephemeral_id=payload["ephemeral_id"],
+        policy_lane=payload.get("policy_lane"),
+        receipt_required=bool(payload.get("receipt_required", True)),
+        supersedes_sam_id=payload.get("supersedes_sam_id"),
+        upstream_url=payload.get("upstream_url"),
+        upstream_method=payload.get("upstream_method"),
+        upstream_payload=dict(payload.get("upstream_payload") or {}),
         constraints=[
             SAMConstraint(key=item["key"], value=item["value"])
             for item in payload.get("constraints", [])
@@ -63,10 +72,13 @@ def _record_from_payload(payload: dict) -> SAMRecord:
 
 
 def _load_tibet_drop_bundle():
-    local_src = "/srv/jtel-stack/sandbox/airdrop-cli/src"
-    if local_src not in sys.path:
-        sys.path.insert(0, local_src)
-    from tibet_drop.bundle import unpack_bundle  # type: ignore
+    try:
+        from tibet_drop.bundle import unpack_bundle  # type: ignore
+    except ImportError:
+        local_src = "/srv/jtel-stack/sandbox/airdrop-cli/src"
+        if local_src not in sys.path:
+            sys.path.insert(0, local_src)
+        from tibet_drop.bundle import unpack_bundle  # type: ignore
 
     return unpack_bundle
 
@@ -94,6 +106,24 @@ def _mock_secret_resolution(secret_id: str) -> str:
     if not secret_id.startswith("sec_"):
         raise SAMGatewayError("sam-secret-unavailable", f"unknown secret id: {secret_id}")
     return f"handle:{secret_id}"
+
+
+def _validate_policy_lane(record: SAMRecord) -> list[SAMGatewayEvent]:
+    events: list[SAMGatewayEvent] = []
+    if not record.policy_lane:
+        return events
+    if record.policy_lane == "publish":
+        constraints = _constraint_map(record)
+        if "registry" not in constraints:
+            raise SAMGatewayError("sam-policy-lane-invalid", "publish lane requires registry constraint")
+    if record.policy_lane == "proxy-egress":
+        if record.target_action != "/proxy/http" or not record.upstream_url:
+            raise SAMGatewayError(
+                "sam-policy-lane-invalid",
+                "proxy-egress lane requires target_action=/proxy/http and upstream_url",
+            )
+    events.append(SAMGatewayEvent("sam-policy-lane", "pass", f"policy_lane={record.policy_lane}"))
+    return events
 
 
 def _break_seal_within_runtime(record: SAMRecord, gateway_actor: str) -> tuple[GatewaySession, SAMGatewayEvent]:
@@ -126,6 +156,56 @@ def _execute_upload_package(record: SAMRecord, session: GatewaySession) -> Gatew
     )
 
 
+def _execute_via_tibet_gateway_proxy(
+    record: SAMRecord,
+    session: GatewaySession,
+    gateway_base_url: str,
+) -> GatewayExecutionResult:
+    if not record.upstream_url:
+        raise SAMGatewayError("sam-upstream-missing", "proxy adapter requires upstream_url")
+    parsed = urlparse(record.upstream_url)
+    if not parsed.hostname:
+        raise SAMGatewayError("sam-upstream-invalid", "upstream_url must have a hostname")
+    constraints = _constraint_map(record)
+    expected_host = constraints.get("host")
+    if expected_host and expected_host != parsed.hostname:
+        raise SAMGatewayError(
+            "sam-constraint-mismatch",
+            f"constraint host expected {expected_host} but upstream host is {parsed.hostname}",
+        )
+    payload = {
+        "agent_id": record.actor_id,
+        "intent": record.intent,
+        "target_url": record.upstream_url,
+        "method": record.upstream_method or "POST",
+        "payload": record.upstream_payload or {},
+        "headers": {},
+    }
+    req = Request(
+        gateway_base_url.rstrip("/") + "/proxy",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(req, timeout=10) as resp:
+            response_text = resp.read().decode("utf-8", errors="replace")
+            status_code = getattr(resp, "status", 200)
+    except Exception as exc:
+        raise SAMGatewayError("sam-gateway-proxy-failed", str(exc)) from exc
+    return GatewayExecutionResult(
+        action=record.target_action,
+        summary="bounded proxy action executed through tibet-gateway",
+        details=[
+            f"gateway_base_url={gateway_base_url}",
+            f"upstream_url={record.upstream_url}",
+            f"upstream_status={status_code}",
+            f"secret_handle={session.secret_handle}",
+            f"gateway_response_bytes={len(response_text)}",
+        ],
+    )
+
+
 def _execute_generic(record: SAMRecord, session: GatewaySession) -> GatewayExecutionResult:
     return GatewayExecutionResult(
         action=record.target_action,
@@ -145,6 +225,11 @@ def list_runtime_adapters() -> list[dict[str, str]]:
             "adapter": "bounded-upload-package",
         },
         {
+            "intent": "proxy_external_call",
+            "target_action": "/proxy/http",
+            "adapter": "tibet-gateway-http-proxy",
+        },
+        {
             "intent": "generic",
             "target_action": "*",
             "adapter": "generic-bounded-executor",
@@ -152,10 +237,21 @@ def list_runtime_adapters() -> list[dict[str, str]]:
     ]
 
 
-def _execute_upstream_action(record: SAMRecord, session: GatewaySession) -> GatewayExecutionResult:
+def _execute_upstream_action(
+    record: SAMRecord,
+    session: GatewaySession,
+    gateway_base_url: str | None = None,
+) -> tuple[GatewayExecutionResult, str]:
     if record.intent == "upload_package" and record.target_action == "/upload/pypi":
-        return _execute_upload_package(record, session)
-    return _execute_generic(record, session)
+        return _execute_upload_package(record, session), "bounded-upload-package"
+    if record.target_action == "/proxy/http":
+        if not gateway_base_url:
+            raise SAMGatewayError("sam-gateway-url-required", "proxy/http adapter requires --gateway-base-url")
+        return (
+            _execute_via_tibet_gateway_proxy(record, session, gateway_base_url),
+            "tibet-gateway-http-proxy",
+        )
+    return _execute_generic(record, session), "generic-bounded-executor"
 
 
 def _destroy_ephemeral_session(session: GatewaySession) -> SAMGatewayEvent:
@@ -173,6 +269,8 @@ def validate_and_execute_sam(
     request_actor: str,
     request_constraints: list[tuple[str, str]] | None = None,
     gateway_actor: str = "jis:humotica:tibet-gateway",
+    gateway_base_url: str | None = None,
+    keychain_record: dict | None = None,
 ) -> SAMGatewayResponse:
     events: list[SAMGatewayEvent] = []
     events.append(SAMGatewayEvent("sam-received", "pass", f"sam_id={record.sam_id}"))
@@ -205,11 +303,22 @@ def validate_and_execute_sam(
                 f"constraint {key} expected {expected} but got {actual!r}",
             )
     events.append(SAMGatewayEvent("sam-constraint-match", "pass", f"constraints={len(expected_constraints)}"))
+    events.extend(_validate_policy_lane(record))
+
+    if keychain_record is not None:
+        for name, status, detail in validate_keychain_binding(
+            keychain_record=keychain_record,
+            secret_id=record.secret_id,
+            actor_id=record.actor_id,
+        ):
+            if status == "fail":
+                raise SAMGatewayError("sam-keychain-denied", f"{name}: {detail}")
+            events.append(SAMGatewayEvent("sam-keychain-check", status, f"{name}={detail}"))
 
     session, opened_event = _break_seal_within_runtime(record, gateway_actor)
     events.append(opened_event)
     events.append(SAMGatewayEvent("sam-secret-proxied", "pass", session.secret_handle))
-    execution = _execute_upstream_action(record, session)
+    execution, runtime_adapter = _execute_upstream_action(record, session, gateway_base_url=gateway_base_url)
     events.append(SAMGatewayEvent("sam-executed", "pass", f"executed_action={execution.action}"))
     events.extend(SAMGatewayEvent("sam-runtime-detail", "pass", detail) for detail in execution.details)
     events.append(_destroy_ephemeral_session(session))
@@ -226,6 +335,9 @@ def validate_and_execute_sam(
         result_summary=execution.summary,
         policy_verdict="allow",
         destroy_session_confirmed=True,
+        policy_lane=record.policy_lane,
+        receipt_required=record.receipt_required,
+        runtime_adapter=runtime_adapter,
         events=events,
     )
 
@@ -233,13 +345,15 @@ def validate_and_execute_sam(
 def render_gateway_failure(
     exc: SAMGatewayError,
     *,
+    record: SAMRecord | None = None,
+    requested_action: str = "<denied>",
     sam_id: str | None = None,
     gateway_actor: str = "jis:humotica:tibet-gateway",
 ) -> SAMGatewayResponse:
     return SAMGatewayResponse(
-        sam_id=sam_id or "<unknown>",
-        ephemeral_id="<unknown>",
-        requested_action="<denied>",
+        sam_id=sam_id or (record.sam_id if record else "<unknown>"),
+        ephemeral_id=record.ephemeral_id if record else "<unknown>",
+        requested_action=requested_action,
         executed_action=None,
         status="denied",
         gateway_actor=gateway_actor,
@@ -247,6 +361,9 @@ def render_gateway_failure(
         result_summary=exc.detail,
         policy_verdict=exc.code,
         destroy_session_confirmed=True,
+        policy_lane=record.policy_lane if record else None,
+        receipt_required=record.receipt_required if record else True,
+        runtime_adapter=None,
         events=[
             SAMGatewayEvent("sam-denied", "fail", f"{exc.code}: {exc.detail}"),
         ],

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tibet-sam"
-version = "0.1.0"
+version = "0.1.1"
 description = "Sealed Authority Module — intent-bound scoped authority capsules for bounded gateway execution"
 readme = "README.md"
 license = "MIT"
@@ -41,6 +41,17 @@ dependencies = [
 [project.optional-dependencies]
 cbom = [
   "tibet-cbom>=0.1.1",
+]
+keychain = [
+  "tibet-keychain>=0.1.0",
+]
+gateway = [
+  "tibet-gateway>=0.3.0",
+]
+full = [
+  "tibet-cbom>=0.1.1",
+  "tibet-keychain>=0.1.0",
+  "tibet-gateway>=0.3.0",
 ]
 dev = [
   "pytest>=8.0",

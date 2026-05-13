@@ -1,0 +1,28 @@
+{
+  "actor_id": "jis:humotica:jasper.admin",
+  "constraints": [
+    {
+      "key": "host",
+      "value": "example.com"
+    }
+  ],
+  "ephemeral_id": "eph_example_proxy001",
+  "intent": "proxy_external_call",
+  "notes": [
+    "package authority capsule example",
+    "proxy-egress lane",
+    "expects a tibet-gateway /proxy adapter"
+  ],
+  "policy_lane": "proxy-egress",
+  "receipt_required": true,
+  "sam_id": "sam_example_proxy001",
+  "secret_id": "sec_pypi_001",
+  "supersedes_sam_id": null,
+  "target_action": "/proxy/http",
+  "upstream_method": "POST",
+  "upstream_payload": {
+    "hello": "world"
+  },
+  "upstream_url": "https://example.com/api",
+  "valid_until": "2026-06-17T12:00:00Z"
+}

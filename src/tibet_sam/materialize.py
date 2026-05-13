@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 from uuid import uuid4
 
+from .keychain_bridge import validate_keychain_binding
 from .types import SAMConstraint, SAMRecord
 
 
@@ -21,9 +22,30 @@ def materialize_sam(
     secret_id: str,
     target_action: str,
     actor_id: str,
+    policy_lane: str | None = None,
+    receipt_required: bool = True,
+    supersedes_sam_id: str | None = None,
+    upstream_url: str | None = None,
+    upstream_method: str | None = None,
+    upstream_payload: dict | None = None,
+    keychain_record: dict | None = None,
     constraints: list[tuple[str, str]] | None = None,
     valid_for_seconds: int = 300,
 ) -> SAMRecord:
+    notes = [
+        "package authority capsule",
+        "can now be emitted as a sealed .tza capsule",
+        "intended to become an intent-bound one-shot authority capsule",
+    ]
+    if keychain_record is not None:
+        for name, status, detail in validate_keychain_binding(
+            keychain_record=keychain_record,
+            secret_id=secret_id,
+            actor_id=actor_id,
+        ):
+            if status == "fail":
+                raise ValueError(f"{name}: {detail}")
+        notes.append("keychain_binding=validated")
     return SAMRecord(
         sam_id=f"sam_{uuid4().hex[:12]}",
         intent=intent,
@@ -32,15 +54,17 @@ def materialize_sam(
         actor_id=actor_id,
         valid_until=_utc_after(valid_for_seconds),
         ephemeral_id=f"eph_{uuid4().hex[:12]}",
+        policy_lane=policy_lane,
+        receipt_required=receipt_required,
+        supersedes_sam_id=supersedes_sam_id,
+        upstream_url=upstream_url,
+        upstream_method=upstream_method,
+        upstream_payload=dict(upstream_payload or {}),
         constraints=[
             SAMConstraint(key=key, value=value)
             for key, value in (constraints or [])
         ],
-        notes=[
-            "sandbox sketch only",
-            "can now be emitted as a sealed .tza capsule",
-            "intended to become an intent-bound one-shot authority capsule",
-        ],
+        notes=notes,
     )
 
 
@@ -52,10 +76,13 @@ def _load_identity(identity_dir: Path):
     priv = ed25519.Ed25519PrivateKey.from_private_bytes(priv_bytes)
     info = _json.loads((identity_dir / "identity.json").read_text())
 
-    local_src = "/srv/jtel-stack/sandbox/airdrop-cli/src"
-    if local_src not in sys.path:
-        sys.path.insert(0, local_src)
-    from tibet_drop.crypto import IdentityKey  # type: ignore
+    try:
+        from tibet_drop.crypto import IdentityKey  # type: ignore
+    except ImportError:
+        local_src = "/srv/jtel-stack/sandbox/airdrop-cli/src"
+        if local_src not in sys.path:
+            sys.path.insert(0, local_src)
+        from tibet_drop.crypto import IdentityKey  # type: ignore
 
     return IdentityKey(priv=priv, pub=priv.public_key()), info["aint"]
 
@@ -76,10 +103,13 @@ def emit_sealed_payload_bundle(
     surface_profile: str = "normal",
     surface_priority: str = "normal",
 ) -> dict:
-    local_src = "/srv/jtel-stack/sandbox/airdrop-cli/src"
-    if local_src not in sys.path:
-        sys.path.insert(0, local_src)
-    from tibet_drop.bundle import pack_bundle  # type: ignore
+    try:
+        from tibet_drop.bundle import pack_bundle  # type: ignore
+    except ImportError:
+        local_src = "/srv/jtel-stack/sandbox/airdrop-cli/src"
+        if local_src not in sys.path:
+            sys.path.insert(0, local_src)
+        from tibet_drop.bundle import pack_bundle  # type: ignore
     import os
     import time
 

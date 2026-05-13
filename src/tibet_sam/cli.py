@@ -13,6 +13,7 @@ from .gateway import (
     validate_and_execute_sam,
 )
 from .inspect import inspect_sam_file, verify_sam_file
+from .keychain_bridge import load_keychain_record
 from .materialize import emit_sam_bundle, materialize_sam
 
 
@@ -38,9 +39,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_runtime.add_argument("--json", action="store_true")
     p_inspect = sub.add_parser("inspect", help="Inspect a SAM JSON or sealed .tza capsule")
     p_inspect.add_argument("sam_file")
+    p_inspect.add_argument("--keychain-record")
     p_inspect.add_argument("--json", action="store_true")
     p_verify = sub.add_parser("verify", help="Verify a SAM JSON or sealed .tza capsule")
     p_verify.add_argument("sam_file")
+    p_verify.add_argument("--keychain-record")
     p_verify.add_argument("--json", action="store_true")
 
     p_materialize = sub.add_parser("materialize", help="Build a sandbox SAM payload")
@@ -48,6 +51,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_materialize.add_argument("--secret-id", required=True)
     p_materialize.add_argument("--target-action", required=True)
     p_materialize.add_argument("--actor-id", default="agent.ai")
+    p_materialize.add_argument("--policy-lane")
+    p_materialize.add_argument("--supersedes-sam-id")
+    p_materialize.add_argument("--receipt-required", dest="receipt_required", action="store_true", default=True)
+    p_materialize.add_argument("--no-receipt-required", dest="receipt_required", action="store_false")
+    p_materialize.add_argument("--upstream-url")
+    p_materialize.add_argument("--upstream-method")
+    p_materialize.add_argument("--payload-json", help="Path to JSON payload for proxy/http adapter")
+    p_materialize.add_argument("--keychain-record")
     p_materialize.add_argument("--constraint", action="append", type=_parse_constraint, default=[])
     p_materialize.add_argument("--valid-for-seconds", type=int, default=300)
     p_materialize.add_argument("--emit-bundle")
@@ -67,7 +78,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_execute.add_argument("--request-actor", required=True)
     p_execute.add_argument("--constraint", action="append", type=_parse_constraint, default=[])
     p_execute.add_argument("--gateway-actor", default="jis:humotica:tibet-gateway")
+    p_execute.add_argument("--gateway-base-url", help="Real tibet-gateway base URL for /proxy/http adapters")
     p_execute.add_argument("--gateway-identity-dir")
+    p_execute.add_argument("--keychain-record")
     p_execute.add_argument("--response-bundle")
     p_execute.add_argument("--receiver-aint", default="self.aint")
     p_execute.add_argument("--receiver-pubkey", default="0" * 64)
@@ -112,7 +125,7 @@ def _cmd_runtime(args: argparse.Namespace) -> int:
 
 
 def _cmd_inspect(args: argparse.Namespace) -> int:
-    payload = inspect_sam_file(args.sam_file)
+    payload = inspect_sam_file(args.sam_file, keychain_record_path=args.keychain_record)
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -123,6 +136,9 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
     print(f"Actor:       {payload['sam']['actor_id']}")
     print(f"Action:      {payload['sam']['target_action']}")
     print(f"Valid Until: {payload['sam']['valid_until']}")
+    if payload["sam"].get("policy_lane"):
+        print(f"Policy:      {payload['sam']['policy_lane']}")
+    print(f"Receipt:     {payload['sam'].get('receipt_required', True)}")
     if payload["source_kind"] == "sealed-bundle":
         print(f"Manifest:    {str(payload.get('manifest_verify_valid')).lower()}")
         print(f"Payload:     {payload.get('manifest', {}).get('payload_type', '<unknown>')}")
@@ -131,7 +147,7 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
 
 
 def _cmd_verify(args: argparse.Namespace) -> int:
-    payload = verify_sam_file(args.sam_file)
+    payload = verify_sam_file(args.sam_file, keychain_record_path=args.keychain_record)
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
@@ -144,11 +160,22 @@ def _cmd_verify(args: argparse.Namespace) -> int:
 
 
 def _cmd_materialize(args: argparse.Namespace) -> int:
+    upstream_payload = {}
+    if args.payload_json:
+        upstream_payload = json.loads(Path(args.payload_json).read_text(encoding="utf-8"))
+    keychain_record = load_keychain_record(args.keychain_record) if args.keychain_record else None
     sam = materialize_sam(
         intent=args.intent,
         secret_id=args.secret_id,
         target_action=args.target_action,
         actor_id=args.actor_id,
+        policy_lane=args.policy_lane,
+        receipt_required=args.receipt_required,
+        supersedes_sam_id=args.supersedes_sam_id,
+        upstream_url=args.upstream_url,
+        upstream_method=args.upstream_method,
+        upstream_payload=upstream_payload,
+        keychain_record=keychain_record,
         constraints=args.constraint,
         valid_for_seconds=args.valid_for_seconds,
     )
@@ -187,13 +214,18 @@ def _cmd_materialize(args: argparse.Namespace) -> int:
 
 def _cmd_execute(args: argparse.Namespace) -> int:
     record = load_sam(args.sam_file)
+    keychain_record = load_keychain_record(args.keychain_record) if args.keychain_record else None
     try:
+        if record.receipt_required and not args.response_bundle:
+            raise SystemExit("ERROR: response bundle is required for this SAM (receipt_required=true)")
         response = validate_and_execute_sam(
             record,
             requested_action=args.requested_action,
             request_actor=args.request_actor,
             request_constraints=args.constraint,
             gateway_actor=args.gateway_actor,
+            gateway_base_url=args.gateway_base_url,
+            keychain_record=keychain_record,
         )
         payload = {"response": response.to_dict()}
         if args.response_bundle:
@@ -214,7 +246,13 @@ def _cmd_execute(args: argparse.Namespace) -> int:
         return 0
     except Exception as exc:
         if hasattr(exc, "code"):
-            response = render_gateway_failure(exc, sam_id=record.sam_id, gateway_actor=args.gateway_actor)
+            response = render_gateway_failure(
+                exc,
+                record=record,
+                requested_action=args.requested_action,
+                sam_id=record.sam_id,
+                gateway_actor=args.gateway_actor,
+            )
         else:
             raise
         payload = {"response": response.to_dict()}

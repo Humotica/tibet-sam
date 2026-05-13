@@ -2,14 +2,21 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-import json
 import tempfile
 
 from .gateway import load_sam
+from .keychain_bridge import load_keychain_record, validate_keychain_binding
 
 
 def _load_tibet_drop_bundle():
-    from tibet_drop.bundle import inspect_bundle, unpack_bundle, verify_bundle  # type: ignore
+    try:
+        from tibet_drop.bundle import inspect_bundle, unpack_bundle, verify_bundle  # type: ignore
+    except ImportError:
+        import sys
+        local_src = "/srv/jtel-stack/sandbox/airdrop-cli/src"
+        if local_src not in sys.path:
+            sys.path.insert(0, local_src)
+        from tibet_drop.bundle import inspect_bundle, unpack_bundle, verify_bundle  # type: ignore
 
     return inspect_bundle, unpack_bundle, verify_bundle
 
@@ -25,7 +32,7 @@ def _block_names(manifest: dict) -> list[str]:
     return names
 
 
-def inspect_sam_file(path: str) -> dict:
+def inspect_sam_file(path: str, keychain_record_path: str | None = None) -> dict:
     source = Path(path)
     record = load_sam(path)
     payload = {
@@ -33,6 +40,8 @@ def inspect_sam_file(path: str) -> dict:
         "source_kind": "sealed-bundle" if source.suffix == ".tza" else "json",
         "sam": record.to_dict(),
     }
+    if keychain_record_path:
+        payload["keychain_record"] = load_keychain_record(keychain_record_path)
     if source.suffix != ".tza":
         return payload
 
@@ -54,8 +63,8 @@ def inspect_sam_file(path: str) -> dict:
     return payload
 
 
-def verify_sam_file(path: str) -> dict:
-    inspected = inspect_sam_file(path)
+def verify_sam_file(path: str, keychain_record_path: str | None = None) -> dict:
+    inspected = inspect_sam_file(path, keychain_record_path=keychain_record_path)
     checks: list[dict[str, str]] = []
     source_kind = inspected["source_kind"]
     sam = inspected["sam"]
@@ -138,6 +147,33 @@ def verify_sam_file(path: str) -> dict:
                 "detail": "JSON source is useful for debug but not sealed",
             }
         )
+
+    if sam.get("policy_lane"):
+        checks.append(
+            {
+                "check": "sam:policy-lane",
+                "status": "pass",
+                "detail": str(sam.get("policy_lane")),
+            }
+        )
+
+    if sam.get("receipt_required"):
+        checks.append(
+            {
+                "check": "sam:receipt-required",
+                "status": "pass",
+                "detail": "true",
+            }
+        )
+
+    keychain_record = inspected.get("keychain_record")
+    if isinstance(keychain_record, dict):
+        for name, status, detail in validate_keychain_binding(
+            keychain_record=keychain_record,
+            secret_id=sam["secret_id"],
+            actor_id=sam["actor_id"],
+        ):
+            checks.append({"check": name, "status": status, "detail": detail})
 
     verdict = "pass"
     if any(check["status"] == "fail" for check in checks):
