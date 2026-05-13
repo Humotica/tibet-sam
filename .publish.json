@@ -1,0 +1,21 @@
+{
+  "package": "tibet-sam",
+  "description": "Sealed Authority Module — bounded authority capsules for gateway execution and sealed receipts",
+  "registries": {
+    "pypi": {
+      "url": "https://pypi.org/project/tibet-sam/",
+      "version": "0.1.0",
+      "deprecated": false
+    },
+    "github": {
+      "url": "https://github.com/Humotica/tibet-sam",
+      "remote": "https://github.com/Humotica/tibet-sam.git"
+    }
+  },
+  "publish": {
+    "pypi": {
+      "command": "cd /srv/jtel-stack/packages/tibet-sam && python -m build && twine upload dist/*",
+      "auth": "~/.pypirc [pypi] token"
+    }
+  }
+}

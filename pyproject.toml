@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tibet-sam"
+version = "0.1.0"
+description = "Sealed Authority Module — intent-bound scoped authority capsules for bounded gateway execution"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+  { name = "Jasper van de Meent", email = "info@humotica.com" },
+  { name = "Root AI", email = "root_idd@humotica.nl" },
+  { name = "Codex", email = "codex@humotica.nl" }
+]
+keywords = [
+  "tibet", "sam", "authority", "gateway", "sealed", "capability",
+  "secret-custody", "bounded-execution", "cbom", "continuity"
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Information Technology",
+  "Intended Audience :: System Administrators",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Security :: Cryptography",
+  "Topic :: Software Development :: Libraries :: Python Modules"
+]
+dependencies = [
+  "cryptography>=42.0",
+  "tibet-drop>=0.3.0"
+]
+
+[project.optional-dependencies]
+cbom = [
+  "tibet-cbom>=0.1.1",
+]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+tibet-sam = "tibet_sam.cli:main"
+tsam = "tibet_sam.cli:main"
+
+[project.urls]
+Homepage = "https://humotica.com"
+Repository = "https://github.com/Humotica/tibet-sam"
+"TIBET Ecosystem" = "https://pypi.org/project/tibet/"
+"Semantic Surface Manifest" = "https://datatracker.ietf.org/doc/draft-vandemeent-tibet-semantic-surface-manifest/"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tibet_sam"]

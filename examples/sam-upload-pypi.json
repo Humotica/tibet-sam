@@ -1,0 +1,24 @@
+{
+  "actor_id": "jis:humotica:agent.ai",
+  "constraints": [
+    {
+      "key": "package",
+      "value": "tibet-zip"
+    },
+    {
+      "key": "registry",
+      "value": "pypi"
+    }
+  ],
+  "ephemeral_id": "eph_example_upload001",
+  "intent": "upload_package",
+  "notes": [
+    "sandbox sketch example",
+    "not yet sealed as .tza",
+    "intended to become an intent-bound one-shot authority capsule"
+  ],
+  "sam_id": "sam_example_upload001",
+  "secret_id": "sec_pypi_001",
+  "target_action": "/upload/pypi",
+  "valid_until": "2026-06-17T12:00:00Z"
+}
